@@ -1,49 +1,124 @@
-# KYEOL Platform GitOps
+# ⚙️ kyeol-platform-gitops
 
-KYEOL 클러스터 플랫폼 애드온 및 ArgoCD 구성 레포지토리입니다.
+> **KYEOL Saleor 프로젝트의 Kubernetes 클러스터 애드온(Helm Charts)을 관리하는 GitOps 레포지토리**
 
-## 디렉토리 구조
+---
+
+## 📌 이 레포는 무엇을 하는가
+
+**Helm Charts**를 사용하여 EKS 클러스터에 필수 플랫폼 컴포넌트를 설치합니다.
+
+**관리 대상**:
+- AWS Load Balancer Controller (ALB Ingress)
+- ExternalDNS (Route53 자동 등록)
+- Metrics Server (HPA용)
+
+---
+
+## 👤 언제 / 누가 / 왜 사용하는가
+
+| 상황 | 사용 여부 |
+|------|:--------:|
+| 새 EKS 클러스터에 애드온 설치 | ✅ 사용 |
+| ALB Controller 버전 업그레이드 | ✅ 사용 |
+| 애플리케이션 배포 | ❌ 미사용 (kyeol-app-gitops 사용) |
+| AWS 인프라 생성 | ❌ 미사용 (kyeol-infra-terraform 사용) |
+
+---
+
+## 🏛️ 전체 아키텍처에서의 위치
+
+```
+[kyeol-infra-terraform]
+    ↓ (EKS 클러스터 생성, IRSA Role 생성)
+[이 레포] kyeol-platform-gitops
+    ↓ (Helm install ALB Controller, ExternalDNS)
+[EKS] Addons Ready
+    ↓
+[kyeol-app-gitops] 앱 배포
+```
+
+---
+
+## 📁 주요 디렉터리/파일 설명
 
 ```
 kyeol-platform-gitops/
-├── argocd/
-│   ├── bootstrap/           # ArgoCD 설치 매니페스트
-│   └── app-of-apps/         # Root App + Projects
-├── clusters/
-│   ├── dev/                 # DEV 클러스터 addons
-│   │   ├── values/          # Helm values 파일
-│   │   └── addons/          # Kustomize 래퍼
-│   ├── mgmt/                # MGMT 클러스터
-│   ├── stage/               # STAGE (템플릿)
-│   └── prod/                # PROD (템플릿)
-└── common/                  # 공통 매니페스트
+├── clusters/                        # 클러스터별 설정
+│   ├── dev/
+│   │   └── values/
+│   │       ├── aws-load-balancer-controller.values.yaml
+│   │       └── external-dns.values.yaml
+│   ├── stage/
+│   │   └── values/
+│   └── prod/
+│       └── values/
+├── common/                          # 공통 설정
+│   └── helmfile.yaml               # (선택) Helmfile 사용 시
+└── argocd/                          # ArgoCD ApplicationSet
+    └── applications/
 ```
 
-## 설치 순서
+### values/ 파일 필수 확인 항목
 
-### 1. MGMT 클러스터에 ArgoCD 설치
+| 항목 | 파일 | 확인 내용 |
+|------|------|----------|
+| IRSA Role ARN | `aws-load-balancer-controller.values.yaml` | `serviceAccount.annotations.eks.amazonaws.com/role-arn` |
+| IRSA Role ARN | `external-dns.values.yaml` | `serviceAccount.annotations.eks.amazonaws.com/role-arn` |
+| Cluster Name | `aws-load-balancer-controller.values.yaml` | `clusterName` |
+| Hosted Zone | `external-dns.values.yaml` | `domainFilters`, `txtOwnerId` |
 
-```bash
-kubectl config use-context arn:aws:eks:ap-southeast-2:ACCOUNT:cluster/min-kyeol-mgmt-eks
-kubectl apply -k argocd/bootstrap/
+---
+
+## ⚠️ 이 레포를 직접 만질 때 주의사항
+
+### 🔧 설치 전 필수 확인
+
+1. **Terraform outputs에서 IRSA Role ARN 확인**
+   ```powershell
+   cd kyeol-infra-terraform/envs/stage
+   terraform output alb_controller_role_arn
+   terraform output external_dns_role_arn
+   ```
+
+2. **values 파일에 ARN 설정**
+
+### 🚫 절대 하지 말아야 할 것
+
+1. **DEV values를 STAGE/PROD에 복사하지 마세요**
+   - 환경별 IRSA Role ARN이 다릅니다
+
+2. **ALB Controller 삭제 주의**
+   - 삭제 시 모든 Ingress ALB도 삭제됨
+
+---
+
+## 🔗 다른 레포와의 관계
+
+| 레포지토리 | 관계 |
+|-----------|------|
+| kyeol-infra-terraform | **이 레포 실행 전** IRSA Role 생성 필요 |
+| kyeol-app-gitops | **이 레포 실행 후** 앱 배포 가능 |
+
+---
+
+## 🚀 빠른 시작
+
+```powershell
+# STAGE 예시
+kubectl config use-context stage
+
+# ALB Controller 설치
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  -f clusters/stage/values/aws-load-balancer-controller.values.yaml
+
+# ExternalDNS 설치
+helm upgrade --install external-dns external-dns/external-dns \
+  -n kube-system \
+  -f clusters/stage/values/external-dns.values.yaml
 ```
 
-### 2. ArgoCD 초기 비밀번호 확인
+---
 
-```bash
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
-```
-
-### 3. DEV 클러스터에 Addons 설치
-
-```bash
-kubectl config use-context arn:aws:eks:ap-southeast-2:ACCOUNT:cluster/min-kyeol-dev-eks
-kubectl apply -k clusters/dev/addons/aws-load-balancer-controller/
-kubectl apply -k clusters/dev/addons/external-dns/
-kubectl apply -k clusters/dev/addons/metrics-server/
-```
-
-## IRSA 설정 필수
-
-Helm values 파일의 `serviceAccount.annotations.eks.amazonaws.com/role-arn`을
-Terraform output의 실제 ARN으로 교체해야 합니다.
+> **마지막 업데이트**: 2026-01-03
